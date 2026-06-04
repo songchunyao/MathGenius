@@ -13,6 +13,39 @@ dist-ssr
 *.local
 .claude
 
+# Environment files
+.env
+
+# Database files
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated server build artifacts (JS output from tsc)
+server/*.js
+server/*.js.map
+server/*.d.ts
+server/*.d.ts.map
+server/db/*.js
+server/db/*.js.map
+server/db/*.d.ts
+server/db/*.d.ts.map
+server/middleware/*.js
+server/middleware/*.js.map
+server/middleware/*.d.ts
+server/middleware/*.d.ts.map
+server/routes/*.js
+server/routes/*.js.map
+server/routes/*.d.ts
+server/routes/*.d.ts.map
+server/services/*.js
+server/services/*.js.map
+server/services/*.d.ts
+server/services/*.d.ts.map
+
+# Generated screenshots (for README)
+screenshots/
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

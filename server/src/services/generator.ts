@@ -1,6 +1,33 @@
-import type { Question, QuizConfig } from '../types'
-import { API_PROVIDERS, API_TIMEOUT_MS } from '../config/constants'
-import { buildSystemPrompt, buildUserMessage } from '../prompts/templates'
+import type { Question, Grade, Semester, Difficulty, AIProvider } from '../types.js'
+import { config } from '../config.js'
+import { buildSystemPrompt, buildUserMessage } from './promptBuilder.js'
+
+export const BATCH_SIZE = 5
+const API_TIMEOUT_MS = 60_000
+
+interface ProviderInfo {
+  name: string
+  endpoint: string
+  defaultModel: string
+}
+
+const API_PROVIDERS: Record<AIProvider, ProviderInfo> = {
+  deepseek: {
+    name: 'DeepSeek',
+    endpoint: 'https://api.deepseek.com/chat/completions',
+    defaultModel: 'deepseek-v4-pro',
+  },
+  glm: {
+    name: '智谱 GLM',
+    endpoint: 'https://open.bigmodel.cn/api/paas/v4/chat/completions',
+    defaultModel: 'glm-5.1',
+  },
+}
+
+function getApiKey(): string {
+  if (config.aiProvider === 'glm') return config.glmApiKey
+  return config.deepseekApiKey
+}
 
 function tryParseJSON(raw: string): unknown {
   // Attempt 1: direct parse
@@ -44,7 +71,6 @@ function tryParseJSON(raw: string): unknown {
 function parseJSONResponse(raw: string): unknown[] {
   const parsed = tryParseJSON(raw)
 
-  // Handle both { questions: [...] } and direct array
   let questions: unknown
   if (Array.isArray(parsed)) {
     questions = parsed
@@ -61,7 +87,7 @@ function parseJSONResponse(raw: string): unknown[] {
   return questions
 }
 
-function validateQuestions(rawQuestions: unknown[]): Omit<Question, 'id'>[] {
+function validateQuestions(rawQuestions: unknown[], difficulty?: Difficulty): Omit<Question, 'id'>[] {
   const requiredStringFields = ['category', 'title', 'prompt', 'answer', 'explanation'] as const
   const valid: Omit<Question, 'id'>[] = []
 
@@ -69,7 +95,6 @@ function validateQuestions(rawQuestions: unknown[]): Omit<Question, 'id'>[] {
     if (typeof raw !== 'object' || raw === null) continue
     const q = raw as Record<string, unknown>
 
-    // Check all required string fields (tip is optional)
     const missingField = requiredStringFields.find(
       field => typeof q[field] !== 'string' || (q[field] as string).trim() === '',
     )
@@ -77,16 +102,30 @@ function validateQuestions(rawQuestions: unknown[]): Omit<Question, 'id'>[] {
 
     if (!Array.isArray(q.options) || q.options.length !== 4) continue
     if (!q.options.every(o => typeof o === 'string')) continue
-    if (!(q.options as string[]).includes(q.answer as string)) continue
+
+    // Fix: AI often returns "A"/"B"/"C"/"D" as answer, map to actual option value
+    let answer = q.answer as string
+    if (!q.options.includes(answer)) {
+      const letterIndex = ['A', 'B', 'C', 'D'].indexOf(answer.toUpperCase())
+      if (letterIndex >= 0 && letterIndex < q.options.length) {
+        answer = q.options[letterIndex]
+      }
+    }
+    // Still doesn't match → skip this question
+    if (!(q.options as string[]).includes(answer)) continue
 
     valid.push({
       category: q.category as string,
       title: q.title as string,
       prompt: q.prompt as string,
       options: q.options as string[],
-      answer: q.answer as string,
+      answer,
       explanation: q.explanation as string,
       tip: (q.tip as string) ?? '',
+      figure: typeof q.figure === 'string' && q.figure.trim() ? q.figure.trim() : '',
+      difficulty: typeof q.difficulty === 'string' && ['easy', 'medium', 'hard'].includes(q.difficulty)
+        ? (q.difficulty as Difficulty)
+        : (difficulty ?? 'medium'),
     })
   }
 
@@ -107,24 +146,29 @@ function parseAPIError(status: number, body: string): string {
   return `请求失败 (HTTP ${status})`
 }
 
-export async function generateQuestions(
-  config: QuizConfig,
+async function makeBatchRequest(
+  grade: Grade,
+  semester: Semester,
+  batchSize: number,
   signal?: AbortSignal,
-): Promise<Question[]> {
-  const provider = API_PROVIDERS[config.provider]
-  if (!provider) throw new Error(`未知的 AI 提供商: ${config.provider}`)
+  difficulty?: Difficulty,
+  units?: string[],
+): Promise<Omit<Question, 'id'>[]> {
+  const provider = API_PROVIDERS[config.aiProvider as AIProvider]
+  if (!provider) throw new Error(`未知的 AI 提供商: ${config.aiProvider}`)
 
-  const systemPrompt = buildSystemPrompt(config.grade, config.semester, config.questionCount)
-  const userMessage = buildUserMessage(config.grade, config.semester, config.questionCount)
+  const systemPrompt = buildSystemPrompt(grade, semester, batchSize, difficulty)
+  const userMessage = buildUserMessage(grade, semester, batchSize, difficulty, units)
+  const apiKey = getApiKey()
 
   const requestBody = {
-    model: config.model,
+    model: provider.defaultModel,
     messages: [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userMessage },
     ],
     temperature: 0.7,
-    max_tokens: 16384,
+    max_tokens: 4096,
   }
 
   const controller = new AbortController()
@@ -139,7 +183,7 @@ export async function generateQuestions(
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.apiKey}`,
+        Authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify(requestBody),
       signal: combinedSignal,
@@ -164,20 +208,71 @@ export async function generateQuestions(
   const rawContent = choice?.message?.content
   if (!rawContent) throw new Error('API 返回内容为空')
 
-  // Detect truncation
   if (choice.finish_reason === 'length') {
-    console.warn('AI 返回内容被截断，可能无法生成全部题目。请尝试减少题目数量。')
+    console.warn('AI 返回内容被截断，可能无法生成全部题目')
   }
 
   const parsed = parseJSONResponse(rawContent)
-  const validated = validateQuestions(parsed)
+  const validated = validateQuestions(parsed, difficulty)
 
   if (validated.length === 0) {
     throw new Error('生成的题目不符合要求，请重试')
   }
 
+  return validated
+}
+
+export async function generateQuestions(
+  grade: Grade,
+  semester: Semester,
+  count: number,
+  difficulty?: Difficulty,
+  units?: string[],
+): Promise<Question[]> {
+  const totalBatches = Math.ceil(count / BATCH_SIZE)
+
+  const batchConfigs = Array.from({ length: totalBatches }, (_, i) => ({
+    index: i,
+    batchCount: Math.min(BATCH_SIZE, count - i * BATCH_SIZE),
+  }))
+
+  // Fire all batches concurrently
+  const results = await Promise.allSettled(
+    batchConfigs.map(b =>
+      makeBatchRequest(grade, semester, b.batchCount, undefined, difficulty, units)
+        .then(qs => ({ index: b.index, questions: qs }))
+    ),
+  )
+
+  // Collect successful batches, sorted by index
+  const fulfilled = results
+    .filter((r): r is PromiseFulfilledResult<{ index: number; questions: Omit<Question, 'id'>[] }> =>
+      r.status === 'fulfilled',
+    )
+    .sort((a, b) => a.value.index - b.value.index)
+
+  // If no batch succeeded, throw the first error
+  if (fulfilled.length === 0) {
+    const firstError = (results.find(r => r.status === 'rejected') as PromiseRejectedResult).reason
+    throw firstError
+  }
+
   // Assign sequential IDs
-  return validated.map((q, i) => ({ ...q, id: i + 1 }))
+  const allQuestions: Question[] = []
+  let idCounter = 0
+
+  for (const { value: { questions } } of fulfilled) {
+    const withIds = questions.map(q => ({ ...q, id: ++idCounter }))
+    allQuestions.push(...withIds)
+  }
+
+  // Log partial failures as warnings
+  const rejected = results.filter(r => r.status === 'rejected')
+  for (const r of rejected) {
+    console.warn('部分批次请求失败:', (r as PromiseRejectedResult).reason)
+  }
+
+  return allQuestions
 }
 
 function combineSignals(...signals: AbortSignal[]): AbortSignal {

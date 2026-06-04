@@ -5,7 +5,7 @@ import type { LoadingStatus, QuizConfig } from '../types'
 interface LoadingViewProps {
   status: LoadingStatus
   config: QuizConfig
-  onRetry: () => void
+  onRetry?: () => void
   onBack: () => void
 }
 
@@ -19,14 +19,16 @@ export default function LoadingView({ status, config, onRetry, onBack }: Loading
           <p className="mt-2 text-sm text-rose-700">{status.message ?? '发生了未知错误，请重试'}</p>
 
           <div className="mt-6 flex flex-wrap items-center justify-center gap-3">
-            <button
-              type="button"
-              onClick={onRetry}
-              className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-3 text-sm font-bold text-white"
-            >
-              <RotateCcw className="h-4 w-4" />
-              重试
-            </button>
+            {onRetry && (
+              <button
+                type="button"
+                onClick={onRetry}
+                className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-3 text-sm font-bold text-white"
+              >
+                <RotateCcw className="h-4 w-4" />
+                重试
+              </button>
+            )}
             <button
               type="button"
               onClick={onBack}
@@ -41,29 +43,29 @@ export default function LoadingView({ status, config, onRetry, onBack }: Loading
     )
   }
 
-  return <LoadingProgress config={config} onBack={onBack} />
+  return <LoadingProgress config={config} message={status.message} onBack={onBack} />
 }
 
-function LoadingProgress({ config, onBack }: { config: QuizConfig; onBack: () => void }) {
-  const [progress, setProgress] = useState(0)
+function LoadingProgress({
+  config,
+  message,
+  onBack,
+}: {
+  config: QuizConfig
+  message?: string
+  onBack: () => void
+}) {
   const [elapsed, setElapsed] = useState(0)
 
   useEffect(() => {
     const startTime = Date.now()
     const timer = setInterval(() => {
-      const elapsedSec = (Date.now() - startTime) / 1000
-      setElapsed(elapsedSec)
-      // Asymptotic curve: approaches 95% but never reaches it
-      // Quick initial progress, then gradually slows
-      const pct = Math.min(95 * (1 - Math.exp(-elapsedSec / 22)), 95)
-      setProgress(Math.round(pct))
+      setElapsed((Date.now() - startTime) / 1000)
     }, 200)
-
     return () => clearInterval(timer)
   }, [])
 
-  const estimatedTotal = 45 // seconds — estimated total time
-  const remaining = Math.max(0, Math.round(estimatedTotal - elapsed))
+  const pct = Math.min(Math.round(95 * (1 - Math.exp(-elapsed / 22))), 95)
 
   return (
     <div className="mx-auto flex max-w-xl flex-col items-center justify-center gap-6 min-h-[60vh]">
@@ -102,40 +104,32 @@ function LoadingProgress({ config, onBack }: { config: QuizConfig; onBack: () =>
           </div>
         </div>
 
-        <h2 className="mt-6 text-xl font-black text-slate-800">AI 正在为你出题...</h2>
+        <h2 className="mt-6 text-xl font-black text-slate-800">
+          {message || '正在加载题目...'}
+        </h2>
         <p className="mt-3 text-sm text-slate-600">
-          正在为 <strong>{config.grade} 年级 {config.semester}</strong> 生成 <strong>{config.questionCount}</strong> 道题目
+          {config.grade} 年级 {config.semester} · {config.questionCount} 道题目
         </p>
 
         {/* Animated progress bar */}
         <div className="mt-6">
           <div className="h-3 overflow-hidden rounded-full bg-slate-200">
             <div
-              className="h-full rounded-full bg-gradient-to-r from-sky-400 to-emerald-400 transition-all duration-300 ease-out"
-              style={{ width: `${Math.max(progress, 3)}%` }}
+              className="h-full rounded-full bg-gradient-to-r from-sky-400 to-emerald-400 transition-all duration-500 ease-out"
+              style={{ width: `${Math.max(pct, 3)}%` }}
             />
           </div>
           <div className="mt-2 flex items-center justify-between text-xs text-slate-500">
-            <span>{progress}%</span>
+            <span>{pct}%</span>
             <span>
-              {elapsed < 10
-                ? '正在准备题目...'
-                : remaining > 0
-                  ? `预计剩余 ${Math.ceil(remaining / 5) * 5} 秒`
-                  : '即将完成...'}
+              {elapsed < 10 ? '正在准备...' : '即将完成...'}
             </span>
             <span>{elapsed.toFixed(0)}s</span>
           </div>
         </div>
 
         <p className="mt-5 text-xs text-slate-500">
-          {progress < 30
-            ? '正在连接 AI 服务...'
-            : progress < 60
-              ? '正在生成题目内容...'
-              : progress < 80
-                ? '正在完善题目解析...'
-                : '正在整理输出...'}
+          {elapsed < 10 ? '正在连接服务器...' : '服务器处理中，请耐心等待...'}
         </p>
 
         <button
